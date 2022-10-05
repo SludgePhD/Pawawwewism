@@ -1,0 +1,13 @@
+[package]
+name = "pawawwewism"
+version = "0.1.0"
+edition = "2021"
+license = "0BSD"
+repository = "https://github.com/SludgePhD/Pawawwewism.git"
+description = "a wewy sewious wibwawy fow stwuctuwed concuwwency, i pwomise :3"
+keywords = ["promise", "worker", "thread", "uwu"]
+categories = ["concurrency"]
+
+[dependencies]
+crossbeam-channel = "0.5.6"
+log = "0.4.17"
