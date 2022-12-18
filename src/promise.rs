@@ -88,6 +88,8 @@ impl<T> PromiseHandle<T> {
     /// [`Promise`]. If the thread has panicked, and it's a [`Worker`] thread, then the next
     /// attempt to send a message to it will propagate the panic to the owning thread, and tear
     /// down the process as usual.
+    ///
+    /// [`Worker`]: crate::Worker
     pub fn block(self) -> Result<T, PromiseDropped> {
         let mut state = self.inner.state.lock().unwrap();
         loop {
