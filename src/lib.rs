@@ -7,8 +7,16 @@
 //!
 //! # Overview
 //!
-//! This library features two main types: [`Worker`] and [`Promise`]. They can be combined and
-//! chained to create arbitrary computation graphs involving different types of data.
+//! This library features 3 main ways of doing structured concurrency:
+//!
+//! - [`background`][background()], which is a simple method to run a closure on a background
+//!   thread.
+//! - [`Worker`] and [`Promise`], which allow constructing arbitrary pipelined computation graphs
+//!   that process packets of work fed to them from the owning thread.
+//! - [`reader::Reader`], a background thread that reads from a cancelable stream and processes or
+//!   forwards the results.
+//!
+//! # Workers and Promises
 //!
 //! ## Workers
 //!
@@ -89,9 +97,12 @@
 //!
 //! [`rayon`]: https://crates.io/crates/rayon
 
+mod background;
 mod drop;
 mod promise;
+pub mod reader;
 mod worker;
 
+pub use background::*;
 pub use promise::*;
 pub use worker::*;
