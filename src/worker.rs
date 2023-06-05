@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 
 use crate::drop::defer;
 
@@ -150,6 +150,10 @@ impl WorkerSetBuilder {
     /// Unlike [`WorkerBuilder::spawn`], this method requires `handler` to implement [`Fn`] (not
     /// just [`FnMut`]), because it is shared across all threads in the set, and may execute several
     /// times at once.
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if `count` is 0.
     pub fn spawn<I, F>(self, count: usize, handler: F) -> io::Result<WorkerSet<I>>
     where
         I: Send + 'static,
@@ -164,7 +168,7 @@ impl WorkerSetBuilder {
         for i in 0..count {
             let mut builder = thread::Builder::new();
             if let Some(name) = &self.name {
-                builder = builder.name(format!("{name}-{i}"));
+                builder = builder.name(format!("{name} ({i})"));
             }
             let recv = recv.clone();
             let handler = handler.clone();
@@ -189,6 +193,7 @@ impl WorkerSetBuilder {
         Ok(WorkerSet {
             sender: Some(sender),
             handles,
+            free_sends: count,
             panic_flag,
         })
     }
@@ -205,6 +210,7 @@ impl WorkerSetBuilder {
 pub struct WorkerSet<I: Send + 'static> {
     sender: Option<Sender<I>>,
     handles: Vec<JoinHandle<()>>,
+    free_sends: usize,
     /// Set to `true` when any thread panics.
     panic_flag: Arc<AtomicBool>,
 }
@@ -251,18 +257,59 @@ impl<I: Send + 'static> WorkerSet<I> {
     /// If the worker has panicked, this will propagate the panic to the calling thread.
     pub fn send(&mut self, msg: I) {
         if self.panic_flag.load(Ordering::Relaxed) {
-            // A thread has panicked. Close the channel to signal all threads to exit.
+            // A thread has panicked. Close the channel to signal all remaining threads to exit.
             drop(self.sender.take());
             self.wait_for_exit();
             unreachable!("should have propagated panic");
         }
 
         if self.sender.as_ref().unwrap().send(msg).is_err() {
-            // All threads have panicked.
+            // All threads have panicked and dropped their receivers.
             // (we don't strictly need to check this but it makes this method match `Worker::send`'s
             // behavior)
             self.wait_for_exit();
             unreachable!("should have propagated panic");
+        }
+        self.free_sends = self.free_sends.saturating_sub(1);
+    }
+
+    /// Tries to send a message to one of the worker threads, without blocking.
+    ///
+    /// If no thread is available to accept the message, this method will return [`Err`] instead of
+    /// blocking. Otherwise, the behavior is the same as for [`WorkerSet::send`].
+    ///
+    /// Note that this operation may fail for a short time after the user-provided processing
+    /// closure has finished execution. This can happen because the worker threads may perform
+    /// internal coordination before they are considered available for the `try_send` operation
+    /// again.
+    pub fn try_send(&mut self, msg: I) -> Result<(), I> {
+        // When the worker threads are spawned, they aren't *immediately* waiting for the channel
+        // send. Since that would result in extremely unintuitive behavior, we work around that by
+        // making the first N `{try_}send`s "free", since they will never really "block" if there
+        // are N threads.
+        if self.free_sends > 0 {
+            // The first `free_sends` send operations always work without blocking.
+            self.send(msg);
+            return Ok(());
+        }
+
+        if self.panic_flag.load(Ordering::Relaxed) {
+            // A thread has panicked. Close the channel to signal all remaining threads to exit.
+            drop(self.sender.take());
+            self.wait_for_exit();
+            unreachable!("should have propagated panic");
+        }
+
+        match self.sender.as_ref().unwrap().try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(value)) => Err(value),
+            Err(TrySendError::Disconnected(_)) => {
+                // All threads have panicked and dropped their receivers.
+                // (we don't strictly need to check this but it makes this method match `Worker::send`'s
+                // behavior)
+                self.wait_for_exit();
+                unreachable!("should have propagated panic");
+            }
         }
     }
 }
@@ -271,6 +318,7 @@ impl<I: Send + 'static> WorkerSet<I> {
 mod tests {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
+        sync::Mutex,
         time::Duration,
     };
 
@@ -338,5 +386,33 @@ mod tests {
     #[test]
     fn workerset_is_send() {
         assert_send::<WorkerSet<()>>();
+    }
+
+    #[test]
+    fn workerset_try_send_works() {
+        let mutex = Arc::new(Mutex::new(0));
+
+        let mut worker = WorkerSet::builder()
+            .spawn(2, {
+                let mutex = mutex.clone();
+                move |()| {
+                    drop(mutex.lock().unwrap());
+                    ()
+                }
+            })
+            .unwrap();
+
+        let guard = mutex.lock().unwrap();
+
+        // `try_send` immediately after spawning should succeed.
+        worker.try_send(()).unwrap();
+        worker.try_send(()).unwrap();
+
+        // Now all threads are waiting for the mutex, so it should fail.
+        worker.try_send(()).unwrap_err();
+
+        drop(guard);
+        // Now all threads can make progress again. Note that we don't know when `try_send` will
+        // work again, since there is no synchronization in that direction that would let us tell.
     }
 }
