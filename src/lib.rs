@@ -100,8 +100,10 @@
 mod background;
 mod drop;
 mod promise;
-pub mod reader;
 mod worker;
+
+pub mod isochronous;
+pub mod reader;
 
 pub use background::*;
 pub use promise::*;
