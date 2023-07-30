@@ -1,6 +1,6 @@
 use std::{
     panic::resume_unwind,
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle, Thread},
 };
 
 /// A simple run-to-completion background thread.
@@ -25,6 +25,13 @@ impl<R> Drop for Background<R> {
                 }
             }
         }
+    }
+}
+
+impl<R> Background<R> {
+    /// Returns a [`Thread`] handle representing this background thread.
+    pub fn thread(&self) -> &Thread {
+        self.handle.as_ref().unwrap().thread()
     }
 }
 

@@ -150,7 +150,8 @@ impl<R: Read> Read for ReadWrapper<R> {
 
 /// Trait for streams that can be shut down externally.
 pub trait Shutdown: Read {
-    /// Shuts down the stream, making any attempt to read from it return `Ok(0)`.
+    /// Shuts down the stream, making any in-progress or future attempt to read from it return
+    /// `Ok(0)`.
     fn shutdown(&self) -> io::Result<()>;
 }
 

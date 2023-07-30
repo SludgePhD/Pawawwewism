@@ -102,7 +102,11 @@ mod drop;
 mod promise;
 mod worker;
 
+#[cfg(test)]
+mod test;
+
 pub mod isochronous;
+pub mod reactive;
 pub mod reader;
 
 pub use background::*;
