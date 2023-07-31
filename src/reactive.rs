@@ -55,12 +55,19 @@ use std::{
 ///
 /// [`Value`] allows synchronous and asynchronous code to exchange a value of type `T` and notify
 /// each other of changes of that data (via [`Condvar`]s and [`Waker`]s, respectively).
+///
+/// [`Value`] can be [`Clone`]d to allow modifications of the underlying value through multiple
+/// owned handles.
 pub struct Value<T>(Arc<Shared<T>>);
 
 /// A read-only handle to a reactive [`Value`].
 ///
 /// [`Reader`] allows fetching the current value, checking whether the value has changed, and also
 /// allows waiting for changes to the underlying value (either synchronously or asynchronously).
+///
+/// [`Reader`]s keep track of the last revision of the data they observed. Every modification of the
+/// underlying value through a [`Value`] handle will update the revision, so that all [`Reader`]s
+/// know that the value has been modified.
 ///
 /// A [`Reader`] can be obtained from a [`Value`] by calling [`Value::reader`], or by cloning an
 /// existing [`Reader`]. Many [`Reader`]s can listen for changes of the same [`Value`].
@@ -73,12 +80,22 @@ pub struct Reader<T> {
 // FIXME: is `Listener` or `Subscriber` a better name?
 
 struct Shared<T> {
+    // FIXME: we should probably ignore poisoning of this mutex properly
     inner: Mutex<ValueInner<T>>,
     /// Condition variable to wake up all threads waiting for changes of this value.
     // FIXME: `Condvar::notify` is expensive (always a syscall), can we add an atomic flag indicating whether any threads are waiting?
     condvar: Condvar,
 
+    /// The number of [`Reader`]s that reference this data.
     reader_count: AtomicUsize,
+    /// The number of [`Value`]s that reference this data.
+    writer_count: AtomicUsize,
+}
+
+impl<T> Shared<T> {
+    fn disconnected(&self) -> bool {
+        self.writer_count.load(Ordering::Acquire) == 0
+    }
 }
 
 struct ValueInner<T> {
@@ -86,12 +103,8 @@ struct ValueInner<T> {
     value: T,
 
     /// Write generation counter. Incremented every time a new value is written.
-    ///
-    /// Value 0 is special-cased and means that the [`Value`] has been dropped.
     // FIXME: this could be an AtomicU64 outside the mutex instead (but we can only write to it while holding the mutex, to avoid races with readers)
     generation: u64,
-
-    disconnected: bool,
 
     /// List of [`Waker`]s tied to tasks that are waiting for changes to this value.
     wakers: Vec<Waker>,
@@ -104,11 +117,11 @@ impl<T> Value<T> {
             inner: Mutex::new(ValueInner {
                 value,
                 generation: 0,
-                disconnected: false,
                 wakers: Vec::new(),
             }),
             condvar: Condvar::new(),
             reader_count: AtomicUsize::new(0),
+            writer_count: AtomicUsize::new(1),
         }))
     }
 
@@ -117,7 +130,7 @@ impl<T> Value<T> {
     /// Any number of [`Reader`]s can be associated with the same [`Value`]. The current number of
     /// [`Reader`]s can be obtained via [`Value::reader_count`].
     pub fn reader(&self) -> Reader<T> {
-        self.0.reader_count.fetch_add(1, Ordering::Relaxed);
+        self.0.reader_count.fetch_add(1, Ordering::Acquire);
         let gen = self.0.inner.lock().unwrap().generation;
         Reader {
             shared: self.0.clone(),
@@ -126,17 +139,24 @@ impl<T> Value<T> {
         }
     }
 
-    /// Returns the current number of [`Reader`]s that are observing this [`Value`] instance.
+    /// Returns the current number of [`Reader`]s that are observing the underlying value.
     #[inline]
     pub fn reader_count(&self) -> usize {
-        self.0.reader_count.load(Ordering::Relaxed)
+        self.0.reader_count.load(Ordering::Acquire)
     }
 
-    /// Returns a [`bool`] indicating whether this [`Value`] is observed by at least 1 [`Reader`]
-    /// and can be usefully updated.
+    /// Returns the current number of [`Value`]s that can modify the underlying value.
+    #[inline]
+    pub fn writer_count(&self) -> usize {
+        self.0.writer_count.load(Ordering::Acquire)
+    }
+
+    /// Returns a [`bool`] indicating whether the underlying value is observed by at least 1
+    /// [`Reader`] and can be usefully updated.
     ///
     /// Modifying a [`Value`] which is not being observed is often an undesirable waste of
-    /// resources, since no [`Reader`] is there to consume the updated value.
+    /// resources, since no [`Reader`] is there to consume the updated value, so this method can be
+    /// used to avoid that.
     ///
     /// Note that there is currently no mechanism to be notified when a [`Reader`] for a specific
     /// [`Value`] is created, so an external mechanism to "reactivate" the owner of the [`Value`]
@@ -150,6 +170,9 @@ impl<T> Value<T> {
     /// Changes the underlying value and notifies all associated [`Reader`]s of the change.
     ///
     /// Returns the previous value.
+    ///
+    /// This will mark the underlying value as changed, even if `new` is equal to the previous
+    /// value. For more control over when the value is marked as modified, see [`Value::modify`].
     pub fn set(&mut self, new: T) -> T {
         self.mutate(|mut inner| mem::replace(&mut inner.value, new))
     }
@@ -184,16 +207,18 @@ impl<T> Value<T> {
 
 impl<T> Drop for Value<T> {
     fn drop(&mut self) {
-        // If the `Value` is dropped, we set the generation counter to the sentinel value indicating
-        // that the `Value` has been discarded, and then wake up every waiting `Reader` so that they
-        // can notify their owner of this.
-
-        // FIXME: if we allow cloneable values this logic has to change to only decrement their number
-        // (other code can then check for `disconnected` by comparing the counter with 0)
+        // Decrement the writer count and notify all readers.
         let mut inner = self.0.inner.lock().unwrap();
-        inner.disconnected = true;
+        self.0.writer_count.fetch_sub(1, Ordering::Release);
         inner.wakers.drain(..).for_each(Waker::wake);
         self.0.condvar.notify_all();
+    }
+}
+
+impl<T> Clone for Value<T> {
+    fn clone(&self) -> Self {
+        self.0.writer_count.fetch_add(1, Ordering::Acquire);
+        Self(self.0.clone())
     }
 }
 
@@ -216,48 +241,87 @@ impl<T> Reader<T> {
             self.read_gen = guard.generation;
             return Ok(f(&guard.value));
         }
-        if guard.disconnected {
+        if self.shared.disconnected() {
             self.read_disconnected = true;
             return Err(Disconnected);
         }
         Ok(f(&guard.value))
     }
 
-    /// Returns a [`bool`] indicating whether changes to the [`Value`] have been made that this
-    /// [`Reader`] hasn't seen yet.
+    /// Returns a [`bool`] indicating whether changes to the underlying value have been made that
+    /// this [`Reader`] hasn't seen yet.
     ///
-    /// The act of dropping the [`Value`] is also treated as a "change" and will make this method
-    /// return `true` until any [`Reader`] method is called that accesses the value (which will now
-    /// return `Err(Disconnected)`).
+    /// The act of dropping the last [`Value`] associated with this [`Reader`] is also treated as a
+    /// "change" and will make this method return `true` until any [`Reader`] method is called that
+    /// accesses the value (which will now return `Err(Disconnected)`).
     ///
     /// This method is the recommended way to perform polling on a [`Reader`] (for example, to check
     /// for new data on every iteration of a continuous rendering loop).
-    pub fn is_changed(&self) -> bool {
+    pub fn has_changed(&self) -> bool {
         let guard = self.shared.inner.lock().unwrap();
-        guard.generation != self.read_gen || guard.disconnected != self.read_disconnected
+        guard.generation != self.read_gen || self.shared.disconnected() != self.read_disconnected
     }
 
-    /// Returns a [`bool`] indicating whether the underlying [`Value`] has been dropped.
+    /// An async signal that resolves when [`Reader::has_changed`] would return `true`.
+    pub async fn has_changed_signal(&self) {
+        struct Waiter<'a, T>(&'a Reader<T>);
+
+        impl<'a, T> Future for Waiter<'a, T> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let mut guard = self.0.shared.inner.lock().unwrap();
+                if guard.generation != self.0.read_gen
+                    || self.0.shared.disconnected() != self.0.read_disconnected
+                {
+                    return Poll::Ready(());
+                }
+                guard.wakers.push(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+
+        Waiter(self).await
+    }
+
+    /// Blocks the calling thread until [`Reader::has_changed`] becomes `true`.
+    ///
+    /// If [`Reader::has_changed`] would already return `true` without blocking, this method will
+    /// return immediately.
+    pub fn block_until_changed(&self) {
+        let mut guard = self.shared.inner.lock().unwrap();
+        loop {
+            if guard.generation != self.read_gen
+                || self.shared.disconnected() != self.read_disconnected
+            {
+                return;
+            }
+            guard = self.shared.condvar.wait(guard).unwrap();
+        }
+    }
+
+    /// Returns a [`bool`] indicating whether all associated [`Value`]s have been dropped.
     ///
     /// If this returns `true`, all methods that access the underlying value will fail with a
     /// [`Disconnected`] error.
     pub fn is_disconnected(&self) -> bool {
-        self.shared.inner.lock().unwrap().disconnected
+        self.shared.disconnected()
     }
 }
 
 impl<T: Clone> Reader<T> {
     /// Retrieves the current value.
     ///
-    /// If the associated [`Value`] has been dropped, a [`Disconnected`] error is returned instead.
+    /// If all associated [`Value`]s have been dropped, a [`Disconnected`] error is returned
+    /// instead.
     pub fn get(&mut self) -> Result<T, Disconnected> {
         self.with(T::clone)
     }
 
     /// Blocks the calling thread until the underlying value changes, and returns the new value.
     ///
-    /// If the [`Value`] has been dropped, or is dropped while blocking, this will return a
-    /// [`Disconnected`] error instead.
+    /// If all associated [`Value`]s have been dropped, or are dropped while blocking, this will
+    /// return a [`Disconnected`] error instead.
     pub fn block(&mut self) -> Result<T, Disconnected> {
         let mut guard = self.shared.inner.lock().unwrap();
         loop {
@@ -265,7 +329,7 @@ impl<T: Clone> Reader<T> {
                 self.read_gen = guard.generation;
                 return Ok(guard.value.clone());
             }
-            if guard.disconnected {
+            if self.shared.disconnected() {
                 self.read_disconnected = true;
                 return Err(Disconnected);
             }
@@ -275,8 +339,8 @@ impl<T: Clone> Reader<T> {
 
     /// Asynchronously waits for the [`Value`] to change, and returns the new value.
     ///
-    /// If the [`Value`] has been dropped, or is dropped while waiting, this will return a
-    /// [`Disconnected`] error instead.
+    /// If all associated [`Value`]s have been dropped, or are dropped while waiting, this will
+    /// return a [`Disconnected`] error instead.
     pub async fn wait(&mut self) -> Result<T, Disconnected> {
         struct Waiter<'a, T>(&'a mut Reader<T>);
 
@@ -292,7 +356,7 @@ impl<T: Clone> Reader<T> {
                     self.0.read_gen = generation;
                     return Poll::Ready(Ok(value));
                 }
-                if guard.disconnected {
+                if self.0.shared.disconnected() {
                     drop(guard);
                     self.0.read_disconnected = true;
                     return Poll::Ready(Err(Disconnected));
@@ -309,7 +373,7 @@ impl<T: Clone> Reader<T> {
 
 impl<T> Clone for Reader<T> {
     fn clone(&self) -> Self {
-        self.shared.reader_count.fetch_add(1, Ordering::Relaxed);
+        self.shared.reader_count.fetch_add(1, Ordering::Acquire);
         Self {
             shared: self.shared.clone(),
             read_gen: self.read_gen,
@@ -321,14 +385,15 @@ impl<T> Clone for Reader<T> {
 impl<T> Drop for Reader<T> {
     #[inline]
     fn drop(&mut self) {
-        self.shared.reader_count.fetch_sub(1, Ordering::Relaxed);
+        self.shared.reader_count.fetch_sub(1, Ordering::Release);
     }
 }
 
 /// Just like a channel, a [`Reader`] can be iterated over, yielding the changes made to the
-/// underlying [`Value`].
+/// underlying value through an associated [`Value`] handle.
 ///
-/// The iterator stops when the [`Value`] is dropped and the [`Reader`] becomes disconnected.
+/// The iterator stops when all associated [`Value`]s are dropped and the [`Reader`] becomes
+/// disconnected.
 impl<T: Clone> IntoIterator for Reader<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
@@ -341,7 +406,8 @@ impl<T: Clone> IntoIterator for Reader<T> {
 
 /// A blocking [`Iterator`] over the values visible to a [`Reader`].
 ///
-/// Every call to [`IntoIter::next`] will block until the underlying [`Value`] is changed.
+/// Every call to [`IntoIter::next`] will block until the underlying value is changed through an
+/// associated [`Value`] handle.
 pub struct IntoIter<T: Clone> {
     reader: Reader<T>,
 }
@@ -448,36 +514,36 @@ mod tests {
         // As long as `value` is in scope, the `reader` should not be disconnected.
         assert!(!reader.is_disconnected());
         // Since `value` wasn't written to since `reader` was created, `is_changed()` is `false`...
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
         // ...but `get` will return the old value.
         assert_eq!(reader.get(), Ok(0));
 
         // If `value` is changed, `reader.next()` will succeed.
         value.set(123);
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(reader.get(), Ok(123));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
 
         // If `value` is changed, `reader.block()` will return immediately.
         value.set(456);
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(reader.block(), Ok(456));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
 
         // If `value` is changed, `reader.wait()` will be `Ready` immediately.
         value.set(789);
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(assert_ready(reader.wait()), Ok(789));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
 
         // If `value` is dropped, the value is marked as changed, and all attempts to read it will
         // return a `Disconnected` error.
         assert_eq!(reader.is_disconnected(), false);
         drop(value);
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(reader.is_disconnected(), true);
         assert_eq!(reader.get(), Err(Disconnected));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
         assert_eq!(reader.block(), Err(Disconnected));
         assert_eq!(assert_ready(reader.wait()), Err(Disconnected));
     }
@@ -494,12 +560,12 @@ mod tests {
         });
 
         assert_eq!(reader.block(), Ok(123));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
         bg.thread().unpark();
         bg.join();
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(reader.get(), Err(Disconnected));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
     }
 
     #[test]
@@ -512,12 +578,12 @@ mod tests {
         });
 
         assert_eq!(block_on(reader.wait()), Ok(123));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
         bg.thread().unpark();
         bg.join();
-        assert_eq!(reader.is_changed(), true);
+        assert_eq!(reader.has_changed(), true);
         assert_eq!(reader.get(), Err(Disconnected));
-        assert_eq!(reader.is_changed(), false);
+        assert_eq!(reader.has_changed(), false);
     }
 
     /// Tests that `Reader` can be cloned, and both clones will be notified of subsequent changes.
@@ -526,17 +592,17 @@ mod tests {
         let mut value = Value::new(0);
         let mut r1 = value.reader();
 
-        assert_eq!(r1.is_changed(), false);
+        assert_eq!(r1.has_changed(), false);
         value.set(123);
         let mut r2 = r1.clone();
 
-        assert_eq!(r1.is_changed(), true);
+        assert_eq!(r1.has_changed(), true);
         assert_eq!(r1.get(), Ok(123));
-        assert_eq!(r1.is_changed(), false);
+        assert_eq!(r1.has_changed(), false);
 
-        assert_eq!(r2.is_changed(), true);
+        assert_eq!(r2.has_changed(), true);
         assert_eq!(r2.get(), Ok(123));
-        assert_eq!(r2.is_changed(), false);
+        assert_eq!(r2.has_changed(), false);
     }
 
     /// Tests that [`Reader`]s will yield that last value written through [`Value`] if it hasn't
@@ -551,5 +617,37 @@ mod tests {
 
         assert_eq!(reader.block(), Ok(123));
         assert_eq!(reader.block(), Err(Disconnected));
+    }
+
+    /// Tests that [`Value`] can be cloned and both instances can be used to update the underlying
+    /// value while notifying all [`Reader`]s.
+    #[test]
+    fn clone_value() {
+        let mut v1 = Value::new(0);
+        assert_eq!(v1.writer_count(), 1);
+        let mut v2 = v1.clone();
+        assert_eq!(v1.writer_count(), 2);
+        assert_eq!(v2.writer_count(), 2);
+
+        let mut r1 = v1.reader();
+        let mut r2 = v2.reader();
+
+        v1.set(123);
+
+        assert!(r1.has_changed());
+        assert!(r2.has_changed());
+        assert_eq!(r1.block(), Ok(123));
+        assert!(!r1.has_changed());
+        assert_eq!(r2.block(), Ok(123));
+        assert!(!r2.has_changed());
+
+        v2.set(456);
+
+        assert!(r1.has_changed());
+        assert!(r2.has_changed());
+        assert_eq!(r1.block(), Ok(456));
+        assert!(!r1.has_changed());
+        assert_eq!(r2.block(), Ok(456));
+        assert!(!r2.has_changed());
     }
 }

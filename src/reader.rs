@@ -99,8 +99,8 @@ impl<R: Shutdown, O> Drop for Reader<R, O> {
 impl<R: Shutdown, O> Reader<R, O> {
     /// Spawns a [`Reader`] that will run `handler` in a separate thread.
     ///
-    /// The contract `reader` has to uphold is as follows: no blocking I/O must be performed, except
-    /// for reading from `read` (which is passed to `handler` in a [`ReadWrapper`]).
+    /// The contract `handler` has to uphold is as follows: no blocking I/O must be performed,
+    /// except for reading from the [`ReadWrapper`] passed to it.
     ///
     /// Also see [`ReaderBuilder`].
     pub fn spawn<F>(read: R, handler: F) -> io::Result<Reader<R, O>>
