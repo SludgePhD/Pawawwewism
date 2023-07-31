@@ -1,6 +1,7 @@
 - `reader` is too hard to use, even a single blocking I/O operation on anything other than the `Shutdown` implementor breaks it
   - given that the point of `reader` is to *allow* (cancelable) I/O, this occurs too often to be practical
-  -> remove it
+  -> remove it?
+- move `background`/`Worker` etc. into a `thread` module
 - "isochronous" stream processing that replicates the input data pacing at the output while running
   the computation pipelined on a thread pool
 
