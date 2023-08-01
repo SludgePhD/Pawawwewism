@@ -5,7 +5,7 @@ edition = "2021"
 license = "0BSD"
 repository = "https://github.com/SludgePhD/Pawawwewism.git"
 description = "a wewy sewious wibwawy fow stwuctuwed concuwwency, i pwomise :3"
-keywords = ["promise", "worker", "thread", "uwu"]
+keywords = ["promise", "worker", "thread", "structured", "reactive"]
 categories = ["concurrency"]
 
 [dependencies]

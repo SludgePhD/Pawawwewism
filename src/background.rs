@@ -12,6 +12,9 @@ use std::{
 ///
 /// Calling [`Background::join`] or dropping a [`Background`] object will join the thread. If the
 /// thread panicked, the panic will be propagated to the owner.
+///
+/// Note that this type of thread cannot be signaled to exit. It will always run to completion. If
+/// this is not the desired behavior, use one of the other primitives in this crate.
 pub struct Background<R> {
     handle: Option<JoinHandle<R>>,
 }

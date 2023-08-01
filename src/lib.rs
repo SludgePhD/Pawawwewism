@@ -1,101 +1,102 @@
-//! A simple library for structured concurrency and heterogeneous thread-based parallel processing.
+//! A simple library providing modern concurrency primitives.
 //!
-//! (if you're looking for homogeneous parallel processing using an iterator-like interface, check
-//! out [`rayon`] instead; if you're looking for running large numbers of I/O tasks concurrently
-//! instead of running a small number of computationally expensive tasks concurrently, you're
-//! probably better served by an `async` runtime)
+//! The goal of this library is to explore the design space of easy-to-use higher-level concurrency
+//! primitives that implement the principles of *structured concurrency*, and also allow bridging
+//! thread-based concurrency and `async` concurrency (via primitives that feature both a blocking
+//! and an `async` API).
+//!
+//! # Why structured concurrency?
+//!
+//! Similar to how `goto` performs unstructured control flow, mechanisms like Go's `go` statement,
+//! or threads/tasks that detach from the code that spawned them, perform *unstructured
+//! concurrency*.
+//! As it turns out, both `goto` and unstructured concurrency share very similar issues, which have
+//! been detailed at length in [this blog post][notes-on-structured-concurrency].
+//!
+//! Modern languages generally eschew `goto` due to its many issues, instead relying on structured
+//! control flow primitives like `if`, loops, `break`, `continue`, and `try ... catch`. However,
+//! they do *not* generally eschew unstructured concurrency, presumably because that problem is
+//! usually considered out-of-scope, or because structured concurrency is unfamiliar to most
+//! programmers.
+//!
+//! While Rust does provide some tools to make concurrency easier, it still does *not*
+//! provide any tools for structured concurrency (beyond [`thread::scope`]).
+//! The wider Rust ecosystem is, unfortunately, no exception here: both `async_std` and `tokio`
+//! allow cheaply spawning *unstructured* async tasks, which will simply continue running in the
+//! background when the corresponding handle is dropped.
+//!
+//! [notes-on-structured-concurrency]: https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/
+//! [`thread::scope`]: std::thread::scope
+//!
+//! # What is structured concurrency (in Rust)?
+//!
+//! In Rust specifically, my interpretation of *structured concurrency* means that:
+//!
+//! - Every background operation (whether thread or async task) is represented by an owned handle.
+//! - No background operation outlasts its handle. If the handle is dropped, the operation is either
+//!   canceled or joined (if it is a thread).
+//!
+//! This prevents resource leaks by joining or aborting the background operation when the value
+//! representing it is dropped. We no longer have to remember to shut down background threads when
+//! some component is shut down. The drawback: the automatic join can potentially hang forever, if
+//! the thread doesn't react to the shutdown request, but this is a lot less subtle than never
+//! stopping a background thread.
+//!
+//! This also brings some immediate code clarity benefits: now every background computation is
+//! *required* to be represented as an in-scope value (frequently a field of a `struct`), constantly
+//! reminding us of its presence.
+//!
+//! Due to Rust's ownership system, the background operations started by a program form a tree, just
+//! like any other owned Rust value, and so have a unique owner (which can be sidestepped via
+//! [`Arc`] and [`Rc`], but that's beside the point). This property actually allows us to add one
+//! bonus feature with relative ease:
+//!
+//! - Panics occurring in background operations will be propagated to its owner.
+//!
+//! This is not normally the case when using [`std::thread`] or async tasks in most popular async
+//! runtimes: those typically surface panics happening in the background thread or task as a
+//! [`Result`].
+//! If structured concurrency is implemented properly, the only way to catch a panic is to do so
+//! explicitly with [`catch_unwind`].
+//! All panics happening inside concurrent operations are handled in a reasonable way automatically,
+//! and will (if the unwinding runtime is used) eventually unwind and reach the program's entry
+//! point, just like panics that happen in sequential code. No additional panics will be raised, and
+//! the piece of code that will be blamed for the panic is always predictable: it's the code owning
+//! or interfacing with the background operation.
+//!
+//! Of course, structured concurrency is not magic. As soon as code stops being sequential, there is
+//! the possibility that *multiple* panics happen at once. Since panics are only propagated when
+//! "interacting" with the background operation in some way (eg. by dropping it, joining it, sending
+//! it more work to do, or checking its status), panics will generally be forwarded to the owning
+//! thread *opportunistically*, when they are noticed, rather than in the order they happened (and
+//! regardless, Rust provides no reliable mechanism for determining this order).
+//! This is why programs utilizing structured concurrency should generally avoid causing any
+//! knock-on panics, like those caused by unwrapping a poisoned mutex, since they might be
+//! propagated before the panic representing the actual root cause.
+//!
+//! [`catch_unwind`]: std::panic::catch_unwind
+//! [`forget`]: std::mem::forget
+//! [`Arc`]: std::sync::Arc
+//! [`Rc`]: std::rc::Rc
 //!
 //! # Overview
 //!
-//! This library features 3 main ways of doing structured concurrency:
+//! This library features several thread-based structured concurrency primitives:
 //!
-//! - [`background`][background()], which is a simple method to run a closure on a background
-//!   thread.
-//! - [`Worker`] and [`Promise`], which allow constructing arbitrary pipelined computation graphs
-//!   that process packets of work fed to them from the owning thread.
+//! - [`background`][background()], which is a simple method to run a closure to completion on a
+//!   [`Background`] thread.
+//! - [`Worker`]/[`WorkerSet`], which is a background thread that processes packets of work fed to
+//!   it from the owning thread.
 //! - [`reader::Reader`], a background thread that reads from a cancelable stream and processes or
 //!   forwards the results.
 //!
-//! # Workers and Promises
+//! Additionally, this library features communication primitives that can be used to exchange data
+//! between background and foreground threads or tasks:
 //!
-//! ## Workers
-//!
-//! [`Worker`] is a wrapper around an OS-level thread that enforces *structured concurrency*: the
-//! idea that concurrent operations should be structured just like other control flow constructs.
-//! When the [`Worker`] is dropped, the underlying thread will be signaled to exit and then joined.
-//! If the thread has panicked, the panic will be forwarded to the thread dropping the [`Worker`].
-//!
-//! These "owned threads" ensure that no stale threads will linger around after a concurrent
-//! operation is done using them. Forwarding the [`Worker`]s panic ensures that the code that
-//! started the computation (by spawning the [`Worker`]) will be torn down properly, as if it had
-//! performed the computation directly rather than spawning a [`Worker`] to do it.
-//!
-//! [`Worker`]s use a message-driven interface, similar to actors. Instead of using a user-written
-//! processing loop, they are sent messages of some user-defined type. This encourages thinking of
-//! code that uses [`Worker`]s as a data processing pipeline: the code that spawns the [`Worker`]
-//! needs to submit input data to it, which can then get transformed and passed somewhere else.
-//!
-//! ## Promises
-//!
-//! [`Promise`] provides a mechanism for communicating the result of a computation back to the code
-//! that started it, or to the next part of the processing pipeline. Once a computation has
-//! finished, its result can be submitted via [`Promise::fulfill`], and the thread holding the
-//! corresponding [`PromiseHandle`] can retrieve it.
-//!
-//! # Usage
-//!
-//! A single [`Worker`] that communicates its result back using a [`Promise`]:
-//!
-//! ```
-//! use pawawwewism::{Worker, Promise, promise};
-//!
-//! let mut worker = Worker::builder().spawn(|(input, promise): (i32, Promise<i32>)| {
-//!     println!("Doing heavy task...");
-//!     let output = input + 1;
-//!     promise.fulfill(output);
-//! }).unwrap();
-//!
-//! let (promise, handle) = promise();
-//! worker.send((1, promise));
-//!
-//! // <do other work concurrently>
-//!
-//! let output = handle.block().expect("worker has dropped the promise; this should be impossible");
-//! assert_eq!(output, 2);
-//! ```
-//!
-//! Multiple [`Worker`] threads can be chained to pipeline a computation:
-//!
-//! ```
-//! use std::collections::VecDeque;
-//! use pawawwewism::{Worker, Promise, PromiseHandle, promise};
-//!
-//! // This worker is identical to the one in the first example
-//! let mut worker1 = Worker::builder().spawn(|(input, promise): (i32, Promise<i32>)| {
-//!     println!("Doing heavy task 1...");
-//!     let output = input + 1;
-//!     promise.fulfill(output);
-//! }).unwrap();
-//!
-//! // The second worker is passed a `PromiseHandle` instead of a direct value
-//! let mut next = 1;
-//! let mut worker2 = Worker::builder().spawn(move |handle: PromiseHandle<i32>| {
-//!     let input = handle.block().unwrap();
-//!     assert_eq!(input, next);
-//!     next += 1;
-//! }).unwrap();
-//!
-//! for input in [0,1,2,3] {
-//!     let (promise1, handle1) = promise();
-//!     worker1.send((input, promise1));
-//!     // On the second iteration and later, this `send` will give `worker1` work to do, while
-//!     // `worker2` still processes the previous element, achieving pipelining.
-//!
-//!     worker2.send(handle1);
-//! }
-//! ```
-//!
-//! [`rayon`]: https://crates.io/crates/rayon
+//! - [`Promise`] and [`PromiseHandle`] provide a mechanism for communicating the result of
+//!   computations (like those performed by a [`Worker`]).
+//! - [`reactive::Value`] is a value that can be changed from one place, and notifies every
+//!   associated [`reactive::Reader`] of that change, so that consumers can react to those changes.
 
 mod background;
 mod drop;

@@ -74,6 +74,61 @@ impl WorkerBuilder {
 /// This type enforces structured concurrency: When it's dropped, the thread will be signaled to
 /// exit and the thread will be joined. If the thread has panicked, the panic will be forwarded
 /// to the thread dropping the [`Worker`].
+///
+/// # Examples
+///
+/// A single [`Worker`] that communicates its result back using a [`Promise`]:
+///
+/// ```
+/// use pawawwewism::{Worker, Promise, promise};
+///
+/// let mut worker = Worker::builder().spawn(|(input, promise): (i32, Promise<i32>)| {
+///     println!("Doing heavy task...");
+///     let output = input + 1;
+///     promise.fulfill(output);
+/// }).unwrap();
+///
+/// let (promise, handle) = promise();
+/// worker.send((1, promise));
+///
+/// // <do other work concurrently>
+///
+/// let output = handle.block().expect("worker has dropped the promise; this should be impossible");
+/// assert_eq!(output, 2);
+/// ```
+///
+/// Multiple [`Worker`] threads can be chained to pipeline a computation:
+///
+/// ```
+/// use std::collections::VecDeque;
+/// use pawawwewism::{Worker, Promise, PromiseHandle, promise};
+///
+/// // This worker is identical to the one in the first example
+/// let mut worker1 = Worker::builder().spawn(|(input, promise): (i32, Promise<i32>)| {
+///     println!("Doing heavy task 1...");
+///     let output = input + 1;
+///     promise.fulfill(output);
+/// }).unwrap();
+///
+/// // The second worker is passed a `PromiseHandle` instead of a direct value
+/// let mut next = 1;
+/// let mut worker2 = Worker::builder().spawn(move |handle: PromiseHandle<i32>| {
+///     let input = handle.block().unwrap();
+///     assert_eq!(input, next);
+///     next += 1;
+/// }).unwrap();
+///
+/// for input in [0,1,2,3] {
+///     let (promise1, handle1) = promise();
+///     worker1.send((input, promise1));
+///     // On the second iteration and later, this `send` will give `worker1` work to do, while
+///     // `worker2` still processes the previous element, achieving pipelining.
+///
+///     worker2.send(handle1);
+/// }
+/// ```
+///
+/// [`Promise`]: crate::Promise
 pub struct Worker<I: Send + 'static> {
     sender: Option<Sender<I>>,
     handle: Option<JoinHandle<()>>,
@@ -205,8 +260,8 @@ impl WorkerSetBuilder {
 /// does not provide enough throughput for the application.
 ///
 /// When [`WorkerSet::send`] is called, or the [`WorkerSet`] is dropped, panics from the worker
-/// threads are propagated to the owning thread. If more than one worker thread has panicked, the
-/// panic payload of one of the panicked threads will be propagated.
+/// threads are propagated to the owning thread. If more than one worker thread has panicked, which
+/// panic will be forwarded is non-deterministic.
 pub struct WorkerSet<I: Send + 'static> {
     sender: Option<Sender<I>>,
     handles: Vec<JoinHandle<()>>,
@@ -254,7 +309,7 @@ impl<I: Send + 'static> WorkerSet<I> {
     ///
     /// If no worker is available to process the message, this will block until one is available.
     ///
-    /// If the worker has panicked, this will propagate the panic to the calling thread.
+    /// If a worker has panicked, this will propagate the panic to the calling thread.
     pub fn send(&mut self, msg: I) {
         if self.panic_flag.load(Ordering::Relaxed) {
             // A thread has panicked. Close the channel to signal all remaining threads to exit.
