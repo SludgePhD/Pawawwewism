@@ -46,10 +46,12 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        Arc,
     },
     task::{Context, Poll, Waker},
 };
+
+use crate::sync::{Condvar, Mutex};
 
 /// A reactive value.
 ///
@@ -80,7 +82,6 @@ pub struct Reader<T> {
 // FIXME: is `Listener` or `Subscriber` a better name?
 
 struct Shared<T> {
-    // FIXME: we should probably ignore poisoning of this mutex properly
     inner: Mutex<ValueInner<T>>,
     /// Condition variable to wake up all threads waiting for changes of this value.
     // FIXME: `Condvar::notify` is expensive (always a syscall), can we add an atomic flag indicating whether any threads are waiting?
@@ -131,7 +132,7 @@ impl<T> Value<T> {
     /// [`Reader`]s can be obtained via [`Value::reader_count`].
     pub fn reader(&self) -> Reader<T> {
         self.0.reader_count.fetch_add(1, Ordering::Acquire);
-        let gen = self.0.inner.lock().unwrap().generation;
+        let gen = self.0.inner.lock().generation;
         Reader {
             shared: self.0.clone(),
             read_gen: gen,
@@ -192,7 +193,7 @@ impl<T> Value<T> {
     }
 
     fn mutate<R>(&mut self, with: impl FnOnce(Mut<'_, ValueInner<T>>) -> R) -> R {
-        let mut inner = self.0.inner.lock().unwrap();
+        let mut inner = self.0.inner.lock();
         let mut changed = false;
         let m = Mut::new(&mut *inner, &mut changed);
         let r = with(m);
@@ -208,7 +209,7 @@ impl<T> Value<T> {
 impl<T> Drop for Value<T> {
     fn drop(&mut self) {
         // Decrement the writer count and notify all readers.
-        let mut inner = self.0.inner.lock().unwrap();
+        let mut inner = self.0.inner.lock();
         self.0.writer_count.fetch_sub(1, Ordering::Release);
         inner.wakers.drain(..).for_each(Waker::wake);
         self.0.condvar.notify_all();
@@ -236,7 +237,7 @@ impl<T> Reader<T> {
     /// This method is available for any type `T`. If `T` implements [`Clone`], consider using
     /// [`Reader::get`] instead, which will clone the value.
     pub fn with<R>(&mut self, f: impl FnOnce(&T) -> R) -> Result<R, Disconnected> {
-        let guard = self.shared.inner.lock().unwrap();
+        let guard = self.shared.inner.lock();
         if guard.generation != self.read_gen {
             self.read_gen = guard.generation;
             return Ok(f(&guard.value));
@@ -258,7 +259,7 @@ impl<T> Reader<T> {
     /// This method is the recommended way to perform polling on a [`Reader`] (for example, to check
     /// for new data on every iteration of a continuous rendering loop).
     pub fn has_changed(&self) -> bool {
-        let guard = self.shared.inner.lock().unwrap();
+        let guard = self.shared.inner.lock();
         guard.generation != self.read_gen || self.shared.disconnected() != self.read_disconnected
     }
 
@@ -270,7 +271,7 @@ impl<T> Reader<T> {
             type Output = ();
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let mut guard = self.0.shared.inner.lock().unwrap();
+                let mut guard = self.0.shared.inner.lock();
                 if guard.generation != self.0.read_gen
                     || self.0.shared.disconnected() != self.0.read_disconnected
                 {
@@ -289,14 +290,14 @@ impl<T> Reader<T> {
     /// If [`Reader::has_changed`] would already return `true` without blocking, this method will
     /// return immediately.
     pub fn block_until_changed(&self) {
-        let mut guard = self.shared.inner.lock().unwrap();
+        let mut guard = self.shared.inner.lock();
         loop {
             if guard.generation != self.read_gen
                 || self.shared.disconnected() != self.read_disconnected
             {
                 return;
             }
-            guard = self.shared.condvar.wait(guard).unwrap();
+            guard = self.shared.condvar.wait(guard);
         }
     }
 
@@ -323,7 +324,7 @@ impl<T: Clone> Reader<T> {
     /// If all associated [`Value`]s have been dropped, or are dropped while blocking, this will
     /// return a [`Disconnected`] error instead.
     pub fn block(&mut self) -> Result<T, Disconnected> {
-        let mut guard = self.shared.inner.lock().unwrap();
+        let mut guard = self.shared.inner.lock();
         loop {
             if guard.generation != self.read_gen {
                 self.read_gen = guard.generation;
@@ -333,7 +334,7 @@ impl<T: Clone> Reader<T> {
                 self.read_disconnected = true;
                 return Err(Disconnected);
             }
-            guard = self.shared.condvar.wait(guard).unwrap();
+            guard = self.shared.condvar.wait(guard);
         }
     }
 
@@ -348,7 +349,7 @@ impl<T: Clone> Reader<T> {
             type Output = Result<T, Disconnected>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let mut guard = self.0.shared.inner.lock().unwrap();
+                let mut guard = self.0.shared.inner.lock();
                 if guard.generation != self.0.read_gen {
                     let value = guard.value.clone();
                     let generation = guard.generation;
