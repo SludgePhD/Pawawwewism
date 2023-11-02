@@ -3,6 +3,7 @@ use std::{
     panic::{self, resume_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{sync_channel, SyncSender},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -46,7 +47,7 @@ impl WorkerBuilder {
         I: Send + 'static,
         F: FnMut(I) + Send + 'static,
     {
-        let (sender, recv) = crossbeam_channel::bounded(self.capacity);
+        let (sender, recv) = sync_channel(self.capacity);
         let mut builder = thread::Builder::new();
         if let Some(name) = self.name.clone() {
             builder = builder.name(name);
@@ -130,7 +131,7 @@ impl WorkerBuilder {
 ///
 /// [`Promise`]: crate::Promise
 pub struct Worker<I: Send + 'static> {
-    sender: Option<Sender<I>>,
+    sender: Option<SyncSender<I>>,
     handle: Option<JoinHandle<()>>,
 }
 

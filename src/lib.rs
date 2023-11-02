@@ -48,7 +48,7 @@
 //!
 //! Due to Rust's ownership system, the background operations started by a program form a tree, just
 //! like any other owned Rust value, and so have a unique owner (which can be sidestepped via
-//! [`Arc`] and [`Rc`], but that's beside the point). This property actually allows us to add one
+//! [`Arc`] and [`Rc`], but that's besides the point). This property actually allows us to add one
 //! bonus feature with relative ease:
 //!
 //! - Panics occurring in background operations will be propagated to its owner.
@@ -98,17 +98,18 @@
 //! - [`reactive::Value`] is a value that can be changed from one place, and notifies every
 //!   associated [`reactive::Reader`] of that change, so that consumers can react to those changes.
 
+#[cfg(test)]
+mod test;
+
 mod background;
 mod drop;
 mod promise;
 mod worker;
 
-#[cfg(test)]
-mod test;
-
 pub mod isochronous;
 pub mod reactive;
 pub mod reader;
+pub mod sync;
 
 pub use background::*;
 pub use promise::*;
