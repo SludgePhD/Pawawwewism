@@ -308,14 +308,14 @@ impl<T> Reader<T> {
     pub fn is_disconnected(&self) -> bool {
         self.shared.disconnected()
     }
-}
-
-impl<T: Clone> Reader<T> {
     /// Retrieves the current value.
     ///
     /// If all associated [`Value`]s have been dropped, a [`Disconnected`] error is returned
     /// instead.
-    pub fn get(&mut self) -> Result<T, Disconnected> {
+    pub fn get(&mut self) -> Result<T, Disconnected>
+    where
+        T: Clone,
+    {
         self.with(T::clone)
     }
 
@@ -323,7 +323,10 @@ impl<T: Clone> Reader<T> {
     ///
     /// If all associated [`Value`]s have been dropped, or are dropped while blocking, this will
     /// return a [`Disconnected`] error instead.
-    pub fn block(&mut self) -> Result<T, Disconnected> {
+    pub fn block(&mut self) -> Result<T, Disconnected>
+    where
+        T: Clone,
+    {
         let mut guard = self.shared.inner.lock();
         loop {
             if guard.generation != self.read_gen {
@@ -342,7 +345,10 @@ impl<T: Clone> Reader<T> {
     ///
     /// If all associated [`Value`]s have been dropped, or are dropped while waiting, this will
     /// return a [`Disconnected`] error instead.
-    pub async fn wait(&mut self) -> Result<T, Disconnected> {
+    pub async fn wait(&mut self) -> Result<T, Disconnected>
+    where
+        T: Clone,
+    {
         struct Waiter<'a, T>(&'a mut Reader<T>);
 
         impl<'a, T: Clone> Future for Waiter<'a, T> {

@@ -51,7 +51,8 @@
 //! [`Arc`] and [`Rc`], but that's besides the point). This property actually allows us to add one
 //! bonus feature with relative ease:
 //!
-//! - Panics occurring in background operations will be propagated to its owner.
+//! - Panics occurring in background operations will be *propagated* to its owner, without causing
+//!   *additional* panics.
 //!
 //! This is not normally the case when using [`std::thread`] or async tasks in most popular async
 //! runtimes: those typically surface panics happening in the background thread or task as a
@@ -61,8 +62,9 @@
 //! All panics happening inside concurrent operations are handled in a reasonable way automatically,
 //! and will (if the unwinding runtime is used) eventually unwind and reach the program's entry
 //! point, just like panics that happen in sequential code. No additional panics will be raised, and
-//! the piece of code that will be blamed for the panic is always predictable: it's the code owning
-//! or interfacing with the background operation.
+//! the pieces of code that are blamed for the panic, and that participate in its propagation are
+//! always predictable: it's the background code raising the original panic, and the code owning or
+//! interfacing with the background operation, respectively.
 //!
 //! Of course, structured concurrency is not magic. As soon as code stops being sequential, there is
 //! the possibility that *multiple* panics happen at once. Since panics are only propagated when

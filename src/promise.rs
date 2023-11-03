@@ -7,6 +7,7 @@ use std::{
 };
 
 /// Creates a connected pair of [`Promise`] and [`PromiseHandle`].
+#[doc(alias = "oneshot")]
 pub fn promise<T>() -> (Promise<T>, PromiseHandle<T>) {
     let inner = Arc::new(PromiseInner {
         state: Mutex::new(PromiseState::Empty(Vec::new())),
