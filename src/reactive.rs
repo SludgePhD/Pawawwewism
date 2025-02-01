@@ -289,6 +289,19 @@ impl<T> Reader<T> {
     /// If [`Reader::has_changed`] would already return `true` without blocking, this method will
     /// return immediately.
     pub fn block_until_changed(&self) {
+        self.block_until_changed_impl(None);
+    }
+
+    /// Blocks the calling thread until [`Reader::has_changed`] becomes `true`, or a timeout
+    /// elapses.
+    ///
+    /// If [`Reader::has_changed`] would already return `true` without blocking, this method will
+    /// return immediately.
+    pub fn block_until_changed_timeout(&self, timeout: Duration) {
+        self.block_until_changed_impl(Some(timeout));
+    }
+
+    fn block_until_changed_impl(&self, timeout: Option<Duration>) {
         let mut guard = self.shared.inner.lock();
         loop {
             if guard.generation != self.read_gen
@@ -296,7 +309,10 @@ impl<T> Reader<T> {
             {
                 return;
             }
-            guard = self.shared.condvar.wait(guard);
+            guard = match timeout {
+                Some(timeout) => self.shared.condvar.wait_timeout(guard, timeout).0,
+                None => self.shared.condvar.wait(guard),
+            };
         }
     }
 
@@ -307,6 +323,7 @@ impl<T> Reader<T> {
     pub fn is_disconnected(&self) -> bool {
         self.shared.disconnected()
     }
+
     /// Retrieves the current value.
     ///
     /// If all associated [`Value`]s have been dropped, a [`Disconnected`] error is returned
