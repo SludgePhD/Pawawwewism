@@ -2,29 +2,7 @@
   - given that the point of `reader` is to *allow* (cancelable) I/O, this occurs too often to be practical
   -> remove it?
 - move `background`/`Worker` etc. into a `thread` module
-- "isochronous" stream processing that replicates the input data pacing at the output while running
-  the computation pipelined on a thread pool
 - add a hybrid channel similar to flume (except without the dependencies)
-
-reactive value sketch
-
-impl Value<T> {
-    pub fn new() -> Self { ... }
-
-    pub fn set(&self, value: T) { ... }
-
-    pub fn reader(&self) -> Reader<T> { ... }
-    pub fn reader_count(&self) -> usize { ... }
-}
-
-impl Reader<T> {
-    pub fn get(&self) -> Option<T> { ... }
-    pub fn next(&self) -> Option<T> { ... }
-
-    pub async fn wait(&self) -> T { ... }
-    pub fn block(&self) -> T { ... }
-}
-
 
 isochronous processor might be better as a `Stream` extension (`stream.pace()`?)
 a better name relating to "wall clock time" might also be better
