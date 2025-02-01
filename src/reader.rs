@@ -36,8 +36,8 @@ impl ReaderBuilder {
 
     /// Spawns a [`Reader`] that will run `handler` in a separate thread.
     ///
-    /// The contract `reader` has to uphold is as follows: no blocking I/O must be performed, except
-    /// for reading from `read` (which is passed to `handler` in a [`ReadWrapper`]). If this
+    /// The contract `reader` has to uphold is as follows: no blocking operations must be performed,
+    /// except for reading from `read` (which is passed to `handler` in a [`ReadWrapper`]). If this
     /// contract is not upheld, the owning thread might block while waiting on a [`Reader`] thread
     /// to exit.
     pub fn spawn<F, R, O>(self, read: R, handler: F) -> io::Result<Reader<R, O>>

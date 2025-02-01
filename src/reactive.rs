@@ -49,6 +49,7 @@ use std::{
         Arc,
     },
     task::{Context, Poll, Waker},
+    time::Duration,
 };
 
 use crate::sync::{Condvar, Mutex};
@@ -79,12 +80,10 @@ pub struct Reader<T> {
     /// Set to `true` once this reader has produced a [`Disconnected`] error.
     read_disconnected: bool,
 }
-// FIXME: is `Listener` or `Subscriber` a better name?
 
 struct Shared<T> {
     inner: Mutex<ValueInner<T>>,
     /// Condition variable to wake up all threads waiting for changes of this value.
-    // FIXME: `Condvar::notify` is expensive (always a syscall), can we add an atomic flag indicating whether any threads are waiting?
     condvar: Condvar,
 
     /// The number of [`Reader`]s that reference this data.
@@ -327,6 +326,24 @@ impl<T> Reader<T> {
     where
         T: Clone,
     {
+        self.block_impl(None)
+    }
+
+    /// Blocks the calling thread until the underlying value changes or a timeout expires.
+    ///
+    /// If all associated [`Value`]s have been dropped, or are dropped while blocking, this will
+    /// return a [`Disconnected`] error instead.
+    pub fn block_timeout(&mut self, timeout: Duration) -> Result<T, Disconnected>
+    where
+        T: Clone,
+    {
+        self.block_impl(Some(timeout))
+    }
+
+    fn block_impl(&mut self, timeout: Option<Duration>) -> Result<T, Disconnected>
+    where
+        T: Clone,
+    {
         let mut guard = self.shared.inner.lock();
         loop {
             if guard.generation != self.read_gen {
@@ -337,7 +354,11 @@ impl<T> Reader<T> {
                 self.read_disconnected = true;
                 return Err(Disconnected);
             }
-            guard = self.shared.condvar.wait(guard);
+
+            guard = match timeout {
+                Some(timeout) => self.shared.condvar.wait_timeout(guard, timeout).0,
+                None => self.shared.condvar.wait(guard),
+            };
         }
     }
 

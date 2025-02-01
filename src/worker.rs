@@ -70,11 +70,11 @@ impl WorkerBuilder {
     }
 }
 
-/// A handle to a worker thread that processes messages of type `I`.
+/// A worker thread that processes messages of type `I`.
 ///
-/// This type enforces structured concurrency: When it's dropped, the thread will be signaled to
-/// exit and the thread will be joined. If the thread has panicked, the panic will be forwarded
-/// to the thread dropping the [`Worker`].
+/// This type enforces structured concurrency: When [`Worker`] is dropped, the thread will be
+/// signaled to exit and the thread will be joined.
+/// If the thread has panicked, the panic will be propagated to the thread dropping the [`Worker`].
 ///
 /// # Examples
 ///
