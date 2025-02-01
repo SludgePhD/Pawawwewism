@@ -1,6 +1,6 @@
 [package]
 name = "pawawwewism"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "0BSD"
 repository = "https://github.com/SludgePhD/Pawawwewism.git"
