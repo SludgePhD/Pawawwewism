@@ -6,6 +6,8 @@
 //! The primary use cases that [`IsochronousProcessor`] was built for was for image processing on
 //! video streams.
 
+#![allow(deprecated)]
+
 use std::{
     collections::VecDeque,
     io, thread,
@@ -19,6 +21,7 @@ use crate::{promise, Promise, PromiseHandle, WorkerSet};
 /// This can be used for real-time (in the "synchronized with wall-clock time" meaning of the word,
 /// not "kills people when it goes wrong") multi-threaded data processing (for when a single thread
 /// has insufficient throughput to match requirements).
+#[deprecated = "poorly tested and designed, not used anywhere"]
 pub struct IsochronousProcessor<I: Send + 'static, O: Send + 'static> {
     workers: WorkerSet<(I, Promise<O>)>,
     in_progress: VecDeque<Job<O>>,
