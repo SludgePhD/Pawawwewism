@@ -2,11 +2,11 @@ use std::{
     future::Future,
     mem,
     pin::Pin,
-    sync::{Arc, Condvar, Mutex},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
-// FIXME: use locking primitives from `crate::sync`
+use crate::sync::{Condvar, Mutex};
 
 /// Creates a connected pair of [`Promise`] and [`PromiseHandle`].
 #[doc(alias = "oneshot")]
@@ -51,7 +51,7 @@ impl<T> Drop for Promise<T> {
             return;
         }
 
-        *self.inner.state.lock().unwrap() = PromiseState::Dropped;
+        *self.inner.state.lock() = PromiseState::Dropped;
         self.inner.condvar.notify_one();
     }
 }
@@ -68,7 +68,7 @@ impl<T> Promise<T> {
         // This ignores errors. The assumption is that the thread will exit once it tries to obtain
         // a new `Promise` to fulfill.
         self.fulfilled = true;
-        let mut guard = self.inner.state.lock().unwrap();
+        let mut guard = self.inner.state.lock();
         let wakers = match &mut *guard {
             PromiseState::Empty(wakers) => mem::take(wakers),
             _ => unreachable!(),
@@ -103,10 +103,10 @@ impl<T> PromiseHandle<T> {
     ///
     /// [`Worker`]: crate::Worker
     pub fn block(self) -> Result<T, PromiseDropped> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock();
         loop {
             match *state {
-                PromiseState::Empty(_) => state = self.inner.condvar.wait(state).unwrap(),
+                PromiseState::Empty(_) => state = self.inner.condvar.wait(state),
                 PromiseState::Fulfilled(_) => {
                     let fulfilled = mem::replace(&mut *state, PromiseState::Dropped);
                     match fulfilled {
@@ -130,7 +130,7 @@ impl<T> PromiseHandle<T> {
         impl<T> Future for Waiter<T> {
             type Output = Result<T, PromiseDropped>;
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let mut state = self.0.inner.state.lock().unwrap();
+                let mut state = self.0.inner.state.lock();
                 match &mut *state {
                     PromiseState::Empty(wakers) => {
                         wakers.push(cx.waker().clone());
