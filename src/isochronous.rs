@@ -6,7 +6,7 @@
 //! The primary use cases that [`IsochronousProcessor`] was built for was for image processing on
 //! video streams.
 
-#![allow(deprecated)]
+#![deprecated = "poorly designed and explained; unused and largely untested"]
 
 use std::{
     collections::VecDeque,

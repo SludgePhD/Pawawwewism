@@ -6,6 +6,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+// FIXME: use locking primitives from `crate::sync`
+
 /// Creates a connected pair of [`Promise`] and [`PromiseHandle`].
 #[doc(alias = "oneshot")]
 pub fn promise<T>() -> (Promise<T>, PromiseHandle<T>) {

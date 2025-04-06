@@ -319,7 +319,7 @@ impl<T> Reader<T> {
     /// Returns a [`bool`] indicating whether all associated [`Value`]s have been dropped.
     ///
     /// If this returns `true`, all methods that access the underlying value will fail with a
-    /// [`Disconnected`] error.
+    /// [`Disconnected`] error once the latest value has been read.
     pub fn is_disconnected(&self) -> bool {
         self.shared.disconnected()
     }

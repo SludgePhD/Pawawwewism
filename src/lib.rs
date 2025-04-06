@@ -100,6 +100,9 @@
 //! - [`reactive::Value`] is a value that can be changed from one place, and notifies every
 //!   associated [`reactive::Reader`] of that change, so that consumers can react to those changes.
 
+// FIXME: required here due to rustc bug https://github.com/rust-lang/rust/issues/47238
+#![allow(deprecated)]
+
 #[cfg(test)]
 mod test;
 

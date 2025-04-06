@@ -1,9 +1,9 @@
 //! A mirror of [`std::sync`] without lock poisoning.
 //!
 //! The [`std::sync::Mutex`] and [`std::sync::RwLock`] types "poison" themselves when they are
-//! locked while the locking thread panics. Attempting to lock a poisoned `Mutex` or `RwLock` would
-//! result in an error that is typically handled by unwrapping it. This was meant to result in all
-//! interacting threads subsequently propagating the error by panicking.
+//! locked while the thread holding the lock panics. Attempting to lock a poisoned `Mutex` or
+//! `RwLock` would result in an error that is typically handled by unwrapping it. This was meant to
+//! result in all interacting threads subsequently propagating the error by panicking.
 //!
 //! Lock poisoning is regarded by many as a misfeature. Those people fall into two camps: those that
 //! argue that locking a poisoning mutex should panic *immediately*, rather than requiring the user
@@ -25,7 +25,8 @@
 //!
 //! Note that this module contains *low-level* primitives like [`Mutex`] and [`RwLock`] that can
 //! *still* be easily misused, leading to deadlocks and race conditions. Prefer using some of the
-//! higher-level constructs in this crate, such as [`reactive::Value`][crate::reactive::Value].
+//! higher-level constructs in this crate, such as [`reactive::Value`][crate::reactive::Value] and
+//! [`Promise`][crate::Promise].
 
 use std::{
     error::Error,

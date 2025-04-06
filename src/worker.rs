@@ -98,37 +98,6 @@ impl WorkerBuilder {
 /// assert_eq!(output, 2);
 /// ```
 ///
-/// Multiple [`Worker`] threads can be chained to pipeline a computation:
-///
-/// ```
-/// use std::collections::VecDeque;
-/// use pawawwewism::{Worker, Promise, PromiseHandle, promise};
-///
-/// // This worker is identical to the one in the first example
-/// let mut worker1 = Worker::builder().spawn(|(input, promise): (i32, Promise<i32>)| {
-///     println!("Doing heavy task 1...");
-///     let output = input + 1;
-///     promise.fulfill(output);
-/// }).unwrap();
-///
-/// // The second worker is passed a `PromiseHandle` instead of a direct value
-/// let mut next = 1;
-/// let mut worker2 = Worker::builder().spawn(move |handle: PromiseHandle<i32>| {
-///     let input = handle.block().unwrap();
-///     assert_eq!(input, next);
-///     next += 1;
-/// }).unwrap();
-///
-/// for input in [0,1,2,3] {
-///     let (promise1, handle1) = promise();
-///     worker1.send((input, promise1));
-///     // On the second iteration and later, this `send` will give `worker1` work to do, while
-///     // `worker2` still processes the previous element, achieving pipelining.
-///
-///     worker2.send(handle1);
-/// }
-/// ```
-///
 /// [`Promise`]: crate::Promise
 pub struct Worker<I: Send + 'static> {
     sender: Option<SyncSender<I>>,
